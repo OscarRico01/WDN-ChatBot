@@ -8,6 +8,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 import re
 import pickle
 import os
+import google.generativeai as genai
 
 # --- Configuração Central dos Agentes ---
 AGENTS = {
@@ -17,7 +18,7 @@ AGENTS = {
 }
 
 def get_knowledge_filepaths(prefix):
-    """Retorna os nomes dos arquivos para um determinado prefixo de ia."""
+    """Retorna os nomes dos arquivos para um determinado prefixo de IA."""
     return {
         "vectorizer": f"{prefix}_vectorizer.pkl",
         "matrix": f"{prefix}_matriz_tfidf.pkl",
@@ -74,41 +75,81 @@ def dividir_texto_em_partes(texto, max_tokens=200):
 
 def encontrar_melhor_resposta_agente(pergunta_usuario, partes_texto, vectorizer, matriz_tfidf):
     if not partes_texto or vectorizer is None or matriz_tfidf is None:
-        return "I do not have the necessary knowledge to participate in this debate."
+        return "Não tenho o conhecimento necessário para participar deste debate."
     vetor_pergunta = vectorizer.transform([pergunta_usuario])
     similaridades = cosine_similarity(vetor_pergunta, matriz_tfidf)
     indice_melhor_parte = np.argmax(similaridades)
     if similaridades[0, indice_melhor_parte] > 0.1:
         return partes_texto[indice_melhor_parte]
     else:
-        return "I did not find relevant information on this topic in my document."
+        return "Não encontrei informações relevantes sobre este tópico no meu documento."
+
+def chamar_api_gemini(prompt_usuario, contexto_agentes):
+    """
+    Chama a API do Gemini com o prompt do usuário e o contexto dos agentes.
+    """
+    try:
+        # FORMA CORRETA:
+        # Busca a chave pelo NOME da variável que você definiu no arquivo secrets.toml
+        api_key = st.secrets["GEMINI_API_KEY"]
+        genai.configure(api_key=api_key)
+        
+    except (KeyError, FileNotFoundError):
+        st.error("Chave da API do Gemini não encontrada. Por favor, configure-a nos segredos do Streamlit.")
+        return "A API do Gemini não está configurada corretamente."
+
+    model = genai.GenerativeModel('gemini-1.5-flash')
+
+    prompt_completo = f"""
+    **Instrução:** Você é um mediador de debate. Sua tarefa é analisar a pergunta de um usuário e as perspectivas de diferentes agentes especialistas. Com base nessas informações, formule uma resposta abrangente e bem fundamentada em português.
+
+    **Pergunta do Usuário:**
+    {prompt_usuario}
+
+    **Perspectivas dos Agentes (Contexto):**
+    {contexto_agentes}
+
+    **Sua Resposta (como mediador):**
+    """
+    try:
+        resposta = model.generate_content(prompt_completo)
+        return resposta.text
+    except Exception as e:
+        st.error(f"Erro ao chamar a API do Gemini: {e}")
+        return "Ocorreu um erro ao gerar a resposta do debate."
 
 def iniciar_debate(prompt, knowledge_base):
-    resposta_final_formatada = "I've consulted my assistants. Here are their perspectives.:\n\n"
+    """
+    Inicia o debate, coleta as perspectivas dos agentes e usa a API do Gemini
+    para gerar uma resposta final.
+    """
+    contexto_para_gemini = ""
     participantes = 0
     for name, info in AGENTS.items():
         k = knowledge_base[info["prefix"]]
         if all(v is not None for v in k.values()):
             participantes += 1
             resposta_agente = encontrar_melhor_resposta_agente(prompt, k["p"], k["v"], k["m"])
-            resposta_final_formatada += f"---\n### {info['icon']} **{name}** diz:\n> {resposta_agente.replace('\n', '\n> ')}\n\n"
-    if participantes == 0:
-        return "Nenhum two more assistants with loaded knowledge. Please process the PDFs in the sidebar so we can discuss."
-    return resposta_final_formatada
+            contexto_para_gemini += f"---\n### {info['icon']} **{name}** diz:\n> {resposta_agente.replace('\n', '\n> ')}\n\n"
 
-# --- FIN: CÓDIGO DEL CHATBOT (FUNCIONES AUXILIARES) ---
+    if participantes == 0:
+        return "Nenhum assistente com conhecimento carregado. Por favor, processe os PDFs na barra lateral para que possamos discutir."
+
+    # Chama a função que usa a API do Gemini
+    resposta_final = chamar_api_gemini(prompt, contexto_para_gemini)
+    return resposta_final
 
 
 def setup_sidebar_knowledge_manager():
     with st.sidebar:
-        st.header("📚 Chatbot knowledge manager")
-        st.write("Upload the PDFs for each specialist agent here.")
+        st.header("📚 Gerenciador de Conhecimento do Chatbot")
+        st.write("Carregue os PDFs para cada agente especialista aqui.")
         for name, info in AGENTS.items():
-            with st.expander(f"{info['icon']} Specialist: {name}", expanded=(name == "Cris")):
-                pdf_file = st.file_uploader(f"Upload PDF for {name}", key=f"pdf_{info['prefix']}", type="pdf")
-                if st.button(f"Process PDF of {name}", key=f"btn_{info['prefix']}"):
+            with st.expander(f"{info['icon']} Especialista: {name}", expanded=(name == "Cris")):
+                pdf_file = st.file_uploader(f"Carregar PDF para {name}", key=f"pdf_{info['prefix']}", type="pdf")
+                if st.button(f"Processar PDF de {name}", key=f"btn_{info['prefix']}"):
                     if pdf_file:
-                        with st.spinner(f"Processing PDF for {name}..."):
+                        with st.spinner(f"Processando PDF para {name}..."):
                             texto = extrair_texto_pdf(pdf_file)
                             if texto:
                                 partes = dividir_texto_em_partes(texto)
@@ -117,78 +158,81 @@ def setup_sidebar_knowledge_manager():
                                     matriz = vectorizer.fit_transform(partes)
                                     if guardar_conocimiento(info['prefix'], vectorizer, matriz, partes):
                                         st.session_state.knowledge[info['prefix']] = {"v": vectorizer, "m": matriz, "p": partes}
-                                        st.success(f"knowledge for {name} safe and activated!")
+                                        st.success(f"Conhecimento para {name} salvo e ativado!")
                                         st.rerun()
                                 else:
-                                    st.error(f"It was not possible to divide the text to{name}.")
+                                    st.error(f"Não foi possível dividir o texto para {name}.")
                             else:
-                                st.error(f"You can't extract text from PDF to {name}.")
+                                st.error(f"Não foi possível extrair texto do PDF para {name}.")
                     else:
-                        st.warning(f"Upload a PDF file to {name} first.")
+                        st.warning(f"Carregue um arquivo PDF para {name} primeiro.")
 
 
 def run_web_application():
-    st.header("WEB APPLICATION: Maintenance Cost-Rate Model")
-    st.subheader("Insert the following parameters")
+    st.header("APLICAÇÃO WEB: Modelo de Custo-Taxa de Manutenção")
+    st.subheader("Insira os seguintes parâmetros")
     col1, col2 = st.columns(2)
     with col1:
-        n1 = st.number_input(f"Scale parameters of the weak components - η1", min_value=0.0, value=0.3)
-        b1 = st.number_input(f"Shape parameter of the weak components - β1", min_value=1.0, max_value=6.0, value=3.0)
-        a = st.number_input(f"Mixing parameter - α", min_value=0.0, max_value=1.0, value=0.05)
-        u = st.number_input(f"Shock arrival rate - μ", min_value=0.0, max_value=2.0, value=0.5)
-        cf = st.number_input("Corrective maintenance cost - CF", min_value=0.0, value=5.0)
-        cn = st.number_input("Natural degradation unit cost - CN", min_value=0.0, value=0.04)
+        n1 = st.number_input(f"Parâmetros de escala dos componentes fracos - η1", min_value=0.0, value=0.3)
+        b1 = st.number_input(f"Parâmetro de forma dos componentes fracos - β1", min_value=1.0, max_value=6.0, value=3.0)
+        a = st.number_input(f"Parâmetro de mistura - α", min_value=0.0, max_value=1.0, value=0.05)
+        u = st.number_input(f"Taxa de chegada de choques - μ", min_value=0.0, max_value=2.0, value=0.5)
+        cf = st.number_input("Custo de manutenção corretiva - CF", min_value=0.0, value=5.0)
+        cn = st.number_input("Custo unitário de degradação natural - CN", min_value=0.0, value=0.04)
     with col2:
-        n2 = st.number_input(f"Scale parameters of the strong components - η2", min_value=0.0, value=3.0)
-        b2 = st.number_input(f"Shape parameter of the strong components - β2", min_value=1.0, max_value=6.0, value=3.0)
-        l = st.number_input(f"Reciprocal mean delay-time - λ", min_value=0.1, value=1.0)
-        ci = st.number_input("Inspection cost - CI", min_value=0.0, value=0.1)
-        cp = st.number_input("Preventive maintenance cost - CP", min_value=0.0, value=1.0)
-        cc = st.number_input("Shock degradation unit cost - CS", min_value=0.0, value=0.04)
-    st.subheader("Insert the following decision variables")
-    k = int(st.number_input("Number of inspections - K", min_value=0, max_value=30, step=1, value=8))
-    d = st.number_input(f"Frequency of inspection - Δ", min_value=0.000, value=0.369, format="%.3f")
-    t = st.number_input("Age for preventive maintenance - T", min_value=0.000, value=3.248, format="%.3f")
-    st.subheader("Click on the button below to run this application:")
-    if st.button("Get Cost-rate"):
-        with st.spinner('Calculating... Please wait.'):
+        n2 = st.number_input(f"Parâmetros de escala dos componentes fortes - η2", min_value=0.0, value=3.0)
+        b2 = st.number_input(f"Parâmetro de forma dos componentes fortes - β2", min_value=1.0, max_value=6.0, value=3.0)
+        l = st.number_input(f"Recíproco do tempo médio de atraso - λ", min_value=0.1, value=1.0)
+        ci = st.number_input("Custo de inspeção - CI", min_value=0.0, value=0.1)
+        cp = st.number_input("Custo de manutenção preventiva - CP", min_value=0.0, value=1.0)
+        cc = st.number_input("Custo unitário de degradação por choque - CS", min_value=0.0, value=0.04)
+    st.subheader("Insira as seguintes variáveis de decisão")
+    k = int(st.number_input("Número de inspeções - K", min_value=0, max_value=30, step=1, value=8))
+    d = st.number_input(f"Frequência de inspeção - Δ", min_value=0.000, value=0.370, format="%.3f")
+    t = st.number_input("Idade para manutenção preventiva - T", min_value=0.000, value=3.25, format="%.3f")
+    st.subheader("Clique no botão abaixo para executar esta aplicação:")
+    if st.button("Obter Custo-Taxa"):
+        with st.spinner('Calculando... Por favor, aguarde.'):
             y = [k, d, t]
             cost_rate = calculate_cost_rate(y, n1, n2, b1, b2, a, l, u, cf, ci, cn, cc, cp)
-            st.success(f"Calculation finished!")
-            st.metric(label="Cost-rate", value=f"{cost_rate:.4f}")
+            st.success(f"Cálculo finalizado!")
+            st.metric(label="Custo-taxa", value=f"{cost_rate:.4f}")
 
 def run_chatbot_app():
-    st.header("🤖 Chatbot with Specialist Agent Discussion", divider=True)
-    st.write("Please ask a question and the assistants will debate a response based on their knowledge.")
-    
+    st.header("🤖 Chatbot com Discussão de Agentes Especialistas", divider=True)
+    st.write("Por favor, faça uma pergunta e os assistentes debaterão uma resposta com base em seus conhecimentos.")
+
     # Exibe histórico de chat
+    if "mensagens" not in st.session_state:
+        st.session_state.mensagens = []
+        
     for msg in st.session_state.mensagens:
         with st.chat_message(msg["role"], avatar=msg.get("avatar", "🤖")):
             st.write(msg["content"])
 
     # Input do usuário
-    if prompt := st.chat_input("Please ask your question for the panel of specialists..."):
+    if prompt := st.chat_input("Faça sua pergunta para o painel de especialistas..."):
         st.session_state.mensagens.append({"role": "user", "content": prompt, "avatar": "👤"})
         with st.chat_message("user", avatar="👤"):
             st.write(prompt)
-        
+
         with st.chat_message("assistant", avatar="🤖"):
-            with st.spinner("The assistants are debating..."):
+            with st.spinner("Os assistentes estão debatendo..."):
                 resposta_debate = iniciar_debate(prompt, st.session_state.knowledge)
                 st.write(resposta_debate)
-        
+
         st.session_state.mensagens.append({"role": "assistant", "content": resposta_debate, "avatar": "🤖"})
 
 
 def main():
-    # --- Configuración de la página ---
+    # --- Configuração da página ---
     st.set_page_config(
-        page_title="Maintenance App & Chatbot",
+        page_title="App de Manutenção & Chatbot",
         page_icon="🔧",
-        layout="centered" # 'centered' puede ser mejor para el modelo, 'wide' para el chat. Elige uno.
+        layout="centered"
     )
 
-    # Inicialización del estado de sesión para el chatbot
+    # Inicialização do estado de sessão para o chatbot
     if "mensagens" not in st.session_state:
         st.session_state.mensagens = []
     if "knowledge" not in st.session_state:
@@ -202,33 +246,33 @@ def main():
             v, m, p = cargar_conocimiento(info["prefix"])
             if v is not None and m is not None and p is not None:
                 st.session_state.knowledge[info['prefix']] = {"v": v, "m": m, "p": p}
-                st.toast(f"Knowledge '{name}' carregado do disco.", icon=info["icon"])
+                st.toast(f"Conhecimento '{name}' carregado do disco.", icon=info["icon"])
 
-    # --- Configuración de la Barra Lateral ---
+    # --- Configuração da Barra Lateral ---
     setup_sidebar_knowledge_manager()
 
-    # --- Título e Imagen Principal ---
+    # --- Título e Imagem Principal ---
     try:
         foto = Image.open('foto.png')
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
             st.image(foto, use_container_width=True)
     except FileNotFoundError:
-        st.warning("Warning: Not found 'foto.png'.")
-    
-    st.title('MAINTENANCE POLICY SOFTWARE')
-    
+        st.warning("Aviso: 'foto.png' não encontrada.")
+
+    st.title('SOFTWARE DE POLÍTICA DE MANUTENÇÃO')
+
     st.divider()
-    with st.expander("View Model Information"):
+    with st.expander("Ver Informações do Modelo"):
         st.write('''
-        The maintenance policy for the motor pump, subject to natural degradation and shocks that place it in a defective state, is enhanced. An additional cost proportional to the time the system remains in a defective condition is introduced, with differentiated costs depending on the origin of the defect. Computational results are obtained through optimization of the frequency of inspections, the interval between consecutive inspections, and the recommended period for carrying out preventive maintenance.
+        A política de manutenção para a motobomba, sujeita à degradação natural e a choques que a colocam em estado defeituoso, é aprimorada. Um custo adicional proporcional ao tempo que o sistema permanece em condição defeituosa é introduzido, com custos diferenciados dependendo da origem do defeito. Resultados computacionais são obtidos através da otimização da frequência de inspeções, do intervalo entre inspeções consecutivas e do período recomendado para a realização da manutenção preventiva.
         ''')
-        st.subheader("Cost Rate Model")
+        st.subheader("Modelo de Taxa de Custo")
         st.latex(r"C_{\infty} = (K, \Delta, T) = \frac{\sum_{s=1}^{9} E_{Cs}}{\sum_{s=1}^{9} E_{Ls}}")
-        st.markdown(r"Where $E[C]$ is the expected cost y $E[L]$ is the expected duration of the cycle.")
-        st.subheader("Distribution Functions")
+        st.markdown(r"Onde $E[C]$ é o custo esperado e $E[L]$ é a duração esperada do ciclo.")
+        st.subheader("Funções de Distribuição")
         st.markdown(r"""
-        **1. Degradation (Weibull):**
+        **1. Degradação (Weibull):**
 
         $$
         f_X(x) = \alpha \left( \frac{\beta_1}{\eta_1} \left( \frac{x}{\eta_1} \right)^{\beta_1 - 1} e^{- \left( \frac{x}{\eta_1} \right)^{\beta_1}} \right)
@@ -236,26 +280,26 @@ def main():
         $$
         """)
 
-        st.markdown(r"**2. Shocks (Exponential):** $f_Z(z) = \mu e^{-\mu z}$")
-        st.markdown(r"**3. Delay-Time (Exponential):** $f_H(h) = \lambda e^{-\lambda h}$")
+        st.markdown(r"**2. Choques (Exponencial):** $f_Z(z) = \mu e^{-\mu z}$")
+        st.markdown(r"**3. Tempo de Atraso (Exponencial):** $f_H(h) = \lambda e^{-\lambda h}$")
 
-    # --- SECCIÓN 1: MODELO MATEMÁTICO ---
+    # --- SEÇÃO 1: MODELO MATEMÁTICO ---
     run_web_application()
 
     # --- Separador Visual ---
     st.divider()
 
-    # --- SECCIÓN 2: CHATBOT ---
+    # --- SEÇÃO 2: CHATBOT ---
     run_chatbot_app()
 
-    # --- SECCIÓN 3: INFORMACIÓN ADICIONAL (en expanders) ---
-   
-    with st.expander("View Website Information"):
-        st.write("O RANDOM - Group of Research in Risk and Analysis of Decisions in Operações and Manutenção, was created in 2012 in order to bring together different researchers who work in the areas of risk and modeling in maintenance and operations.")
-        st.markdown('[Click here to be redirected to the official site](https://sites.ufpe.br/random/)', unsafe_allow_html=True)
+    # --- SEÇÃO 3: INFORMAÇÃO ADICIONAL (em expanders) ---
+
+    with st.expander("Ver Informações do Site"):
+        st.write("O RANDOM - Grupo de Pesquisa em Risco e Análise de Decisões em Operações e Manutenção, foi criado em 2012 com o objetivo de reunir diferentes pesquisadores que atuam nas áreas de risco e modelagem em manutenção e operações.")
+        st.markdown('[Clique aqui para ser redirecionado para o site oficial](https://sites.ufpe.br/random/)', unsafe_allow_html=True)
 
 
-# Función de cálculo del modelo (sin cambios)
+# Função de cálculo do modelo (sem alterações)
 def calculate_cost_rate(y, n1, n2, b1, b2, a, l, u, cf, ci, cn, cc, cp):
     K, D, T = y[0], y[1], y[2]
     f01 = lambda x: (b1 / n1) * ((x / n1)**(b1 - 1)) * np.exp(-(x / n1)**b1)
@@ -312,6 +356,6 @@ def calculate_cost_rate(y, n1, n2, b1, b2, a, l, u, cf, ci, cn, cc, cp):
     sv += t9
     return sc / sv if sv != 0 else 0
 
-# --- Punto de entrada del script ---
+# --- Ponto de entrada do script ---
 if __name__ == '__main__':
     main()
