@@ -85,12 +85,8 @@ def encontrar_melhor_resposta_agente(pergunta_usuario, partes_texto, vectorizer,
         return "Não encontrei informações relevantes sobre este tópico no meu documento."
 
 def chamar_api_gemini(prompt_usuario, contexto_agentes):
-    """
-    Chama a API do Gemini com o prompt do usuário e o contexto dos agentes.
-    """
+   
     try:
-        # FORMA CORRETA:
-        # Busca a chave pelo NOME da variável que você definiu no arquivo secrets.toml
         api_key = st.secrets["GEMINI_API_KEY"]
         genai.configure(api_key=api_key)
         
@@ -135,7 +131,6 @@ def iniciar_debate(prompt, knowledge_base):
     if participantes == 0:
         return "Nenhum assistente com conhecimento carregado. Por favor, processe os PDFs na barra lateral para que possamos discutir."
 
-    # Chama a função que usa a API do Gemini
     resposta_final = chamar_api_gemini(prompt, contexto_para_gemini)
     return resposta_final
 
